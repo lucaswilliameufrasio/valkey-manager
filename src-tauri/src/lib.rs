@@ -40,7 +40,17 @@ enum WorkspaceTab {
 struct KeyDetails {
     kind: String,
     ttl_seconds: i64,
-    value: Option<String>,
+    value: KeyValue,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum KeyValue {
+    String(String),
+    List(Vec<String>),
+    Hash(Vec<(String, String)>),
+    Set(Vec<String>),
+    SortedSet(Vec<(String, f64)>),
+    Unsupported,
 }
 
 #[derive(Clone, Default)]
@@ -69,6 +79,81 @@ fn parse_command(input: &str) -> Result<(String, Vec<String>), String> {
     }
     let command = parts.remove(0).to_ascii_uppercase();
     Ok((command, parts))
+}
+
+pub async fn read_key_value(
+    client: &RedisClient,
+    key: &str,
+    kind: &str,
+) -> Result<KeyValue, String> {
+    match kind {
+        "string" => client
+            .get::<Option<String>, _>(key)
+            .await
+            .map(|value| KeyValue::String(value.unwrap_or_default()))
+            .map_err(|error| error.to_string()),
+        "list" => client
+            .lrange::<Vec<String>, _>(key, 0, 99)
+            .await
+            .map(KeyValue::List)
+            .map_err(|error| error.to_string()),
+        "hash" => {
+            let scanner = client.hscan(key, "*", Some(100));
+            futures_util::pin_mut!(scanner);
+            let mut fields = Vec::new();
+            while let Some(mut page) = scanner
+                .try_next()
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                if let Some(results) = page.take_results() {
+                    fields.extend(results.iter().map(|(field, value)| {
+                        (
+                            field.as_str_lossy().to_string(),
+                            value
+                                .as_str_lossy()
+                                .map(|value| value.into_owned())
+                                .unwrap_or_default(),
+                        )
+                    }));
+                }
+                if fields.len() >= 100 {
+                    break;
+                }
+                page.next().map_err(|error| error.to_string())?;
+            }
+            Ok(KeyValue::Hash(fields))
+        }
+        "set" => {
+            let scanner = client.sscan(key, "*", Some(100));
+            futures_util::pin_mut!(scanner);
+            let mut members = Vec::new();
+            while let Some(mut page) = scanner
+                .try_next()
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                if let Some(results) = page.take_results() {
+                    members.extend(
+                        results.into_iter().filter_map(|value| {
+                            value.as_str_lossy().map(|value| value.into_owned())
+                        }),
+                    );
+                }
+                if members.len() >= 100 {
+                    break;
+                }
+                page.next().map_err(|error| error.to_string())?;
+            }
+            Ok(KeyValue::Set(members))
+        }
+        "zset" => client
+            .zrange::<Vec<(String, f64)>, _, _, _>(key, 0, 99, None, false, None, true)
+            .await
+            .map(KeyValue::SortedSet)
+            .map_err(|error| error.to_string()),
+        _ => Ok(KeyValue::Unsupported),
+    }
 }
 
 struct ValkeyManagerApp {
@@ -368,14 +453,7 @@ impl ValkeyManagerApp {
                     .await
                     .map_err(|error| error.to_string())?;
                 let ttl_seconds = client.ttl(&key).await.map_err(|error| error.to_string())?;
-                let value = if kind == "string" {
-                    client
-                        .get::<Option<String>, _>(&key)
-                        .await
-                        .map_err(|error| error.to_string())?
-                } else {
-                    None
-                };
+                let value = read_key_value(&client, &key, &kind).await?;
                 Ok(KeyDetails {
                     kind,
                     ttl_seconds,
@@ -580,25 +658,77 @@ impl ValkeyManagerApp {
                 ui.label(format!("TTL: {ttl}"));
             });
 
-            if details.kind == "string" {
-                ui.label("Value");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.key_value)
-                        .desired_rows(8)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("TTL seconds (blank = persistent)");
-                    ui.add(egui::TextEdit::singleline(&mut self.ttl_input).desired_width(100.0));
-                    if ui.button("Save value").clicked() {
-                        self.save_selected_string();
-                    }
-                });
-            } else {
-                ui.label(format!(
-                    "The {} value viewer is not available yet.",
-                    details.kind
-                ));
+            match &details.value {
+                KeyValue::String(_) => {
+                    ui.label("Value");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.key_value)
+                            .desired_rows(8)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("TTL seconds (blank = persistent)");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.ttl_input).desired_width(100.0),
+                        );
+                        if ui.button("Save value").clicked() {
+                            self.save_selected_string();
+                        }
+                    });
+                }
+                KeyValue::List(values) => {
+                    ui.label("List entries (first 100)");
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for (index, value) in values.iter().enumerate() {
+                                ui.monospace(format!("{index}: {value}"));
+                            }
+                        });
+                }
+                KeyValue::Hash(fields) => {
+                    ui.label("Hash fields (first 100)");
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for (field, value) in fields {
+                                ui.horizontal(|ui| {
+                                    ui.monospace(field);
+                                    ui.label("→");
+                                    ui.monospace(value);
+                                });
+                            }
+                        });
+                }
+                KeyValue::Set(members) => {
+                    ui.label("Set members (first 100)");
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for member in members {
+                                ui.monospace(member);
+                            }
+                        });
+                }
+                KeyValue::SortedSet(members) => {
+                    ui.label("Sorted-set members (first 100)");
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for (member, score) in members {
+                                ui.horizontal(|ui| {
+                                    ui.monospace(member);
+                                    ui.label(format!("score: {score}"));
+                                });
+                            }
+                        });
+                }
+                KeyValue::Unsupported => {
+                    ui.label(format!(
+                        "Value display is not supported for {}.",
+                        details.kind
+                    ));
+                }
             }
 
             ui.horizontal(|ui| {
@@ -727,7 +857,10 @@ impl ValkeyManagerApp {
                 }
                 UiEvent::KeyDetails(key, Ok(details)) => {
                     if self.selected_key.as_deref() == Some(&key) {
-                        self.key_value = details.value.clone().unwrap_or_default();
+                        self.key_value = match &details.value {
+                            KeyValue::String(value) => value.clone(),
+                            _ => String::new(),
+                        };
                         self.ttl_input = if details.ttl_seconds > 0 {
                             details.ttl_seconds.to_string()
                         } else {

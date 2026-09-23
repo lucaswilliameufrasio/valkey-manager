@@ -3,6 +3,7 @@ use fred::{
     types::{ClusterHash, CustomCommand, Expiration},
 };
 use uuid::Uuid;
+use valkey_manager_lib::{read_key_value, KeyValue};
 
 #[tokio::test]
 #[ignore = "requires a local Valkey instance; set VALKEY_TEST_URL to run"]
@@ -34,6 +35,10 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
     let source = format!("valkey-manager:test:{}", Uuid::new_v4());
     let destination = format!("{source}:renamed");
     let occupied = format!("{source}:occupied");
+    let list = format!("{source}:list");
+    let hash = format!("{source}:hash");
+    let set = format!("{source}:set");
+    let sorted_set = format!("{source}:zset");
 
     client
         .set::<(), _, _>(&source, "initial", None, None, false)
@@ -50,6 +55,50 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
         .await
         .expect("read key type");
     assert_eq!(kind, "string");
+
+    client
+        .rpush::<i64, _, _>(&list, vec!["first", "second"])
+        .await
+        .expect("create list value");
+    client
+        .custom::<i64, _>(
+            CustomCommand::new("HSET", ClusterHash::FirstKey, false),
+            vec![hash.clone(), "field".to_owned(), "value".to_owned()],
+        )
+        .await
+        .expect("create hash value");
+    client
+        .sadd::<i64, _, _>(&set, vec!["member"])
+        .await
+        .expect("create set value");
+    client
+        .zadd::<i64, _, _>(
+            &sorted_set,
+            None,
+            None,
+            false,
+            false,
+            vec![(2.5, "scored-member")],
+        )
+        .await
+        .expect("create sorted-set value");
+
+    assert_eq!(
+        read_key_value(&client, &list, "list").await.unwrap(),
+        KeyValue::List(vec!["first".to_owned(), "second".to_owned()])
+    );
+    assert_eq!(
+        read_key_value(&client, &hash, "hash").await.unwrap(),
+        KeyValue::Hash(vec![("field".to_owned(), "value".to_owned())])
+    );
+    assert_eq!(
+        read_key_value(&client, &set, "set").await.unwrap(),
+        KeyValue::Set(vec!["member".to_owned()])
+    );
+    assert_eq!(
+        read_key_value(&client, &sorted_set, "zset").await.unwrap(),
+        KeyValue::SortedSet(vec![("scored-member".to_owned(), 2.5)])
+    );
 
     client
         .set::<(), _, _>(&source, "with ttl", Some(Expiration::EX(30)), None, false)
@@ -74,9 +123,16 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
     assert!(!overwritten);
 
     let deleted: i64 = client
-        .del(&[destination.as_str(), occupied.as_str()])
+        .del(&[
+            destination.as_str(),
+            occupied.as_str(),
+            list.as_str(),
+            hash.as_str(),
+            set.as_str(),
+            sorted_set.as_str(),
+        ])
         .await
         .expect("delete test keys");
-    assert_eq!(deleted, 2);
+    assert_eq!(deleted, 6);
     client.quit().await.expect("close test connection");
 }
