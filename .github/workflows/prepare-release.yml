@@ -62,6 +62,7 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import os
           import re
+          import subprocess
           from pathlib import Path
 
           requested = os.environ["VERSION_INPUT"].removeprefix("v")
@@ -72,9 +73,19 @@ jobs:
           match = re.search(r'(?m)^version = "([^"]+)"$', manifest)
           if match is None:
               raise SystemExit("could not read current package version")
-          current = match.group(1)
-          if requested == current:
-              raise SystemExit(f"version {requested} is already current")
+          current = tuple(int(part) for part in match.group(1).split("."))
+          requested_parts = tuple(int(part) for part in requested.split("."))
+          if requested_parts < current:
+              raise SystemExit("release version cannot be lower than the manifest version")
+
+          tag = subprocess.run(
+              ["git", "tag", "--list", f"v{requested}"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.strip()
+          if tag:
+              raise SystemExit(f"release tag v{requested} already exists")
 
           print(f"version={requested}")
           PY
