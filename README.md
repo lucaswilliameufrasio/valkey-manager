@@ -1,7 +1,33 @@
-# Tauri + Vue + TypeScript
+# Valkey Manager
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Native desktop client for Valkey, built with Rust, egui/eframe, and `fred`.
 
-## Recommended IDE Setup
+## Run
 
-- [VS Code](https://code.visualstudio.com/) + [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+Install the Rust toolchain and the system development libraries required by egui's
+windowing and OpenGL backends, then run from the repository root:
+
+```sh
+cargo run
+```
+
+The current native UI supports saved standalone connections, password storage in the
+operating system keychain, a glob-based browser (up to 500 keys per scan), key type
+and TTL inspection, bounded previews for strings, lists, hashes, sets, and sorted
+sets, string value editing, collection member/field updates, safe rename, confirmed
+deletion, an asynchronous command console, and a basic server monitor (`PING`,
+version, uptime, clients, memory, processed commands, and database key count).
+Network work does not block the UI.
+
+For authenticated servers, enter the URL (for example `rediss://user@host:6380`),
+enter the password in the masked password field, and save the profile. The profile
+file stores the endpoint without its password; the secret stays in the system
+keychain.
+
+## Current migration status
+
+The original Tauri/Vue implementation is preserved in the repository while its
+functionality is migrated to the native egui app. The current egui slice provides
+standalone connection profiles, keychain-backed credentials, and basic key browsing
+and collection operations, console, and monitoring. Sentinel/Cluster support remains
+to be migrated.
