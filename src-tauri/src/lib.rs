@@ -25,6 +25,15 @@ enum UiEvent {
     KeyDeleted(String, Result<(), String>),
     KeyRenamed(String, String, Result<(), String>),
     Disconnected(Result<(), String>),
+    CommandResult(Result<String, String>),
+    MonitorResult(Result<MonitorSnapshot, String>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspaceTab {
+    Keys,
+    Console,
+    Monitor,
 }
 
 #[derive(Clone)]
@@ -32,6 +41,34 @@ struct KeyDetails {
     kind: String,
     ttl_seconds: i64,
     value: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct MonitorSnapshot {
+    ping: String,
+    version: String,
+    uptime_seconds: String,
+    connected_clients: String,
+    used_memory: String,
+    commands_processed: String,
+    keys_in_database: String,
+}
+
+fn info_field(info: &str, name: &str) -> String {
+    info.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}:")))
+        .unwrap_or("—")
+        .to_owned()
+}
+
+fn parse_command(input: &str) -> Result<(String, Vec<String>), String> {
+    let mut parts =
+        shlex::split(input).ok_or_else(|| "Could not parse command arguments".to_owned())?;
+    if parts.is_empty() {
+        return Err("Enter a command first".to_owned());
+    }
+    let command = parts.remove(0).to_ascii_uppercase();
+    Ok((command, parts))
 }
 
 struct ValkeyManagerApp {
@@ -52,6 +89,10 @@ struct ValkeyManagerApp {
     ttl_input: String,
     rename_input: String,
     confirm_delete: bool,
+    active_tab: WorkspaceTab,
+    command_input: String,
+    command_output: String,
+    monitor: Option<MonitorSnapshot>,
     sender: Sender<UiEvent>,
     receiver: Receiver<UiEvent>,
 }
@@ -91,6 +132,10 @@ impl Default for ValkeyManagerApp {
             ttl_input: String::new(),
             rename_input: String::new(),
             confirm_delete: false,
+            active_tab: WorkspaceTab::Keys,
+            command_input: String::new(),
+            command_output: String::new(),
+            monitor: None,
             sender,
             receiver,
         }
@@ -429,6 +474,231 @@ impl ValkeyManagerApp {
         });
     }
 
+    fn run_console_command(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let (command, parts) = match parse_command(&self.command_input) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.command_output = error;
+                return;
+            }
+        };
+        let sender = self.sender.clone();
+        self.status = format!("Running {command}…");
+        self.runtime.spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                client.custom::<RedisValue, _>(
+                    CustomCommand::new(&command, ClusterHash::FirstKey, false),
+                    parts,
+                ),
+            )
+            .await
+            .map_err(|_| "Command timed out after 30 seconds".to_owned())
+            .and_then(|result| {
+                result
+                    .map(|value| format!("{value:?}"))
+                    .map_err(|e| e.to_string())
+            });
+            let _ = sender.send(UiEvent::CommandResult(result));
+        });
+    }
+
+    fn refresh_monitor(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        self.status = "Refreshing server metrics…".to_owned();
+        self.runtime.spawn(async move {
+            let result: Result<MonitorSnapshot, String> = async {
+                let ping: String = client.ping().await.map_err(|error| error.to_string())?;
+                let info: String = client.info(None).await.map_err(|error| error.to_string())?;
+                let keys_in_database: i64 =
+                    client.dbsize().await.map_err(|error| error.to_string())?;
+                Ok(MonitorSnapshot {
+                    ping,
+                    version: info_field(&info, "redis_version"),
+                    uptime_seconds: info_field(&info, "uptime_in_seconds"),
+                    connected_clients: info_field(&info, "connected_clients"),
+                    used_memory: info_field(&info, "used_memory_human"),
+                    commands_processed: info_field(&info, "total_commands_processed"),
+                    keys_in_database: keys_in_database.to_string(),
+                })
+            }
+            .await;
+            let _ = sender.send(UiEvent::MonitorResult(result));
+        });
+    }
+
+    fn render_keys(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Key browser");
+        ui.separator();
+        if self.client.is_none() {
+            ui.centered_and_justified(|ui| {
+                ui.label("Connect to a Valkey instance to browse its keys.");
+            });
+            return;
+        }
+        if self.keys.is_empty() {
+            ui.label("No keys found for this pattern.");
+        } else {
+            let mut requested_key = None;
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for key in &self.keys {
+                        if ui
+                            .selectable_label(self.selected_key.as_ref() == Some(key), key)
+                            .clicked()
+                        {
+                            requested_key = Some(key.clone());
+                        }
+                    }
+                });
+            if let Some(key) = requested_key {
+                self.load_key(key);
+            }
+        }
+
+        if let (Some(key), Some(details)) = (self.selected_key.clone(), self.key_details.clone()) {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.heading("Key details");
+                ui.monospace(&key);
+            });
+            let ttl = match details.ttl_seconds {
+                -2 => "Missing".to_owned(),
+                -1 => "Persistent".to_owned(),
+                seconds => format!("{seconds}s"),
+            };
+            ui.horizontal(|ui| {
+                ui.label(format!("Type: {}", details.kind));
+                ui.separator();
+                ui.label(format!("TTL: {ttl}"));
+            });
+
+            if details.kind == "string" {
+                ui.label("Value");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.key_value)
+                        .desired_rows(8)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("TTL seconds (blank = persistent)");
+                    ui.add(egui::TextEdit::singleline(&mut self.ttl_input).desired_width(100.0));
+                    if ui.button("Save value").clicked() {
+                        self.save_selected_string();
+                    }
+                });
+            } else {
+                ui.label(format!(
+                    "The {} value viewer is not available yet.",
+                    details.kind
+                ));
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Rename to");
+                ui.add(egui::TextEdit::singleline(&mut self.rename_input).desired_width(220.0));
+                if ui.button("Rename safely").clicked() {
+                    self.rename_selected_key();
+                }
+                if ui.button("Delete…").clicked() {
+                    self.confirm_delete = true;
+                }
+            });
+            if self.confirm_delete {
+                ui.group(|ui| {
+                    ui.label(format!("Permanently delete {key}?"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Confirm delete").clicked() {
+                            self.delete_selected_key();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_delete = false;
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    fn render_console(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Command console");
+        ui.label("Arguments support shell-style quotes; no shell is invoked.");
+        ui.horizontal(|ui| {
+            let input = ui.add_enabled(
+                self.client.is_some(),
+                egui::TextEdit::singleline(&mut self.command_input)
+                    .hint_text("GET my:key")
+                    .desired_width(f32::INFINITY),
+            );
+            let run = ui
+                .add_enabled(self.client.is_some(), egui::Button::new("Run"))
+                .clicked();
+            if run || (input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+            {
+                self.run_console_command();
+            }
+        });
+        ui.label("Response");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut self.command_output)
+                    .desired_rows(16)
+                    .desired_width(f32::INFINITY)
+                    .interactive(false),
+            );
+        });
+    }
+
+    fn render_monitor(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Server monitor");
+            if ui
+                .add_enabled(self.client.is_some(), egui::Button::new("Refresh"))
+                .clicked()
+            {
+                self.refresh_monitor();
+            }
+        });
+        ui.separator();
+        if let Some(snapshot) = &self.monitor {
+            egui::Grid::new("server-metrics")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("PING");
+                    ui.monospace(&snapshot.ping);
+                    ui.end_row();
+                    ui.label("Valkey version");
+                    ui.monospace(&snapshot.version);
+                    ui.end_row();
+                    ui.label("Uptime (seconds)");
+                    ui.monospace(&snapshot.uptime_seconds);
+                    ui.end_row();
+                    ui.label("Connected clients");
+                    ui.monospace(&snapshot.connected_clients);
+                    ui.end_row();
+                    ui.label("Memory used");
+                    ui.monospace(&snapshot.used_memory);
+                    ui.end_row();
+                    ui.label("Commands processed");
+                    ui.monospace(&snapshot.commands_processed);
+                    ui.end_row();
+                    ui.label("Keys in selected database");
+                    ui.monospace(&snapshot.keys_in_database);
+                    ui.end_row();
+                });
+        } else {
+            ui.label("Refresh to load server health and INFO metrics.");
+        }
+    }
+
     fn receive_events(&mut self) {
         let events = self.receiver.try_iter().collect::<Vec<_>>();
         for event in events {
@@ -509,6 +779,19 @@ impl ValkeyManagerApp {
                     self.status = "Not connected".to_owned();
                 }
                 UiEvent::Disconnected(Err(error)) => self.status = error,
+                UiEvent::CommandResult(Ok(output)) => {
+                    self.command_output = output;
+                    self.status = "Command completed".to_owned();
+                }
+                UiEvent::CommandResult(Err(error)) => {
+                    self.command_output = error.clone();
+                    self.status = error;
+                }
+                UiEvent::MonitorResult(Ok(snapshot)) => {
+                    self.monitor = Some(snapshot);
+                    self.status = "Server metrics updated".to_owned();
+                }
+                UiEvent::MonitorResult(Err(error)) => self.status = error,
             }
         }
     }
@@ -609,99 +892,31 @@ impl eframe::App for ValkeyManagerApp {
                     }
                 });
 
-                columns[1].heading("Key browser");
+                columns[1].horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.active_tab == WorkspaceTab::Keys, "Keys")
+                        .clicked()
+                    {
+                        self.active_tab = WorkspaceTab::Keys;
+                    }
+                    if ui
+                        .selectable_label(self.active_tab == WorkspaceTab::Console, "Console")
+                        .clicked()
+                    {
+                        self.active_tab = WorkspaceTab::Console;
+                    }
+                    if ui
+                        .selectable_label(self.active_tab == WorkspaceTab::Monitor, "Monitor")
+                        .clicked()
+                    {
+                        self.active_tab = WorkspaceTab::Monitor;
+                    }
+                });
                 columns[1].separator();
-                if self.client.is_none() {
-                    columns[1].centered_and_justified(|ui| {
-                        ui.label("Connect to a Valkey instance to browse its keys.");
-                    });
-                } else if self.keys.is_empty() {
-                    columns[1].label("No keys found for this pattern.");
-                } else {
-                    let mut requested_key = None;
-                    egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
-                        for key in &self.keys {
-                            if ui
-                                .selectable_label(self.selected_key.as_ref() == Some(key), key)
-                                .clicked()
-                            {
-                                requested_key = Some(key.clone());
-                            }
-                        }
-                    });
-                    if let Some(key) = requested_key {
-                        self.load_key(key);
-                    }
-                }
-
-                if let (Some(key), Some(details)) =
-                    (self.selected_key.clone(), self.key_details.clone())
-                {
-                    columns[1].separator();
-                    columns[1].horizontal(|ui| {
-                        ui.heading("Key details");
-                        ui.monospace(&key);
-                    });
-                    let ttl = match details.ttl_seconds {
-                        -2 => "Missing".to_owned(),
-                        -1 => "Persistent".to_owned(),
-                        seconds => format!("{seconds}s"),
-                    };
-                    columns[1].horizontal(|ui| {
-                        ui.label(format!("Type: {}", details.kind));
-                        ui.separator();
-                        ui.label(format!("TTL: {ttl}"));
-                    });
-
-                    if details.kind == "string" {
-                        columns[1].label("Value");
-                        columns[1].add(
-                            egui::TextEdit::multiline(&mut self.key_value)
-                                .desired_rows(8)
-                                .desired_width(f32::INFINITY),
-                        );
-                        columns[1].horizontal(|ui| {
-                            ui.label("TTL seconds (blank = persistent)");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.ttl_input)
-                                    .desired_width(100.0),
-                            );
-                            if ui.button("Save value").clicked() {
-                                self.save_selected_string();
-                            }
-                        });
-                    } else {
-                        columns[1].label(format!(
-                            "The {} value viewer is not available yet.",
-                            details.kind
-                        ));
-                    }
-
-                    columns[1].horizontal(|ui| {
-                        ui.label("Rename to");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.rename_input).desired_width(220.0),
-                        );
-                        if ui.button("Rename safely").clicked() {
-                            self.rename_selected_key();
-                        }
-                        if ui.button("Delete…").clicked() {
-                            self.confirm_delete = true;
-                        }
-                    });
-                    if self.confirm_delete {
-                        columns[1].group(|ui| {
-                            ui.label(format!("Permanently delete {key}?"));
-                            ui.horizontal(|ui| {
-                                if ui.button("Confirm delete").clicked() {
-                                    self.delete_selected_key();
-                                }
-                                if ui.button("Cancel").clicked() {
-                                    self.confirm_delete = false;
-                                }
-                            });
-                        });
-                    }
+                match self.active_tab {
+                    WorkspaceTab::Keys => self.render_keys(&mut columns[1]),
+                    WorkspaceTab::Console => self.render_console(&mut columns[1]),
+                    WorkspaceTab::Monitor => self.render_monitor(&mut columns[1]),
                 }
             });
         });
@@ -730,5 +945,27 @@ mod tests {
     #[test]
     fn default_endpoint_is_a_valid_valkey_url() {
         assert!(RedisConfig::from_url("redis://127.0.0.1:6379").is_ok());
+    }
+
+    #[test]
+    fn console_parser_keeps_quoted_arguments_together() {
+        let (command, arguments) = parse_command("set greeting \"hello valkey\"").unwrap();
+
+        assert_eq!(command, "SET");
+        assert_eq!(arguments, ["greeting", "hello valkey"]);
+    }
+
+    #[test]
+    fn console_parser_rejects_empty_or_unclosed_input() {
+        assert!(parse_command("   ").is_err());
+        assert!(parse_command("set key \"unfinished").is_err());
+    }
+
+    #[test]
+    fn info_parser_reads_fields_without_confusing_similar_names() {
+        let info = "# Server\nredis_version:8.0.1\nredis_git_sha1:abcd\n";
+
+        assert_eq!(info_field(info, "redis_version"), "8.0.1");
+        assert_eq!(info_field(info, "version"), "—");
     }
 }

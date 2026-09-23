@@ -16,6 +16,7 @@ fred = { version = "7.0.0", features = ["tokio-rustls", "sentinel-client"] }
 futures-util = "0.3.31"
 keyring = "4.2.0"
 serde = { version = "1", features = ["derive"] }
+shlex = "2.0.1"
 thiserror = "2.0.17"
 tokio = { version = "1.47.1", features = ["full"] }
 toml = "1.1.6"

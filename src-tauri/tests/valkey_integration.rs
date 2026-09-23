@@ -17,6 +17,20 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
         .await
         .expect("connect to local Valkey");
 
+    let ping: String = client.ping().await.expect("ping local Valkey");
+    assert_eq!(ping, "PONG");
+    let info: String = client.info(None).await.expect("read server information");
+    assert!(info.contains("redis_version:") || info.contains("valkey_version:"));
+    let _database_size: i64 = client.dbsize().await.expect("read database key count");
+    let console_ping: String = client
+        .custom(
+            CustomCommand::new("PING", ClusterHash::FirstKey, false),
+            Vec::<String>::new(),
+        )
+        .await
+        .expect("execute a console command");
+    assert_eq!(console_ping, "PONG");
+
     let source = format!("valkey-manager:test:{}", Uuid::new_v4());
     let destination = format!("{source}:renamed");
     let occupied = format!("{source}:occupied");
