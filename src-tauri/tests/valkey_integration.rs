@@ -1,6 +1,6 @@
 use fred::{
     prelude::*,
-    types::{ClusterHash, CustomCommand, Expiration},
+    types::{ClusterHash, CustomCommand, Expiration, SetOptions},
 };
 use uuid::Uuid;
 use valkey_manager_lib::{read_key_value, KeyValue};
@@ -35,6 +35,7 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
     let source = format!("valkey-manager:test:{}", Uuid::new_v4());
     let destination = format!("{source}:renamed");
     let occupied = format!("{source}:occupied");
+    let created = format!("{source}:created");
     let list = format!("{source}:list");
     let hash = format!("{source}:hash");
     let set = format!("{source}:set");
@@ -55,6 +56,23 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
         .await
         .expect("read key type");
     assert_eq!(kind, "string");
+
+    let created_once: Option<String> = client
+        .set(&created, "created value", None, Some(SetOptions::NX), false)
+        .await
+        .expect("create key without replacing existing data");
+    assert_eq!(created_once.as_deref(), Some("OK"));
+    let created_again: Option<String> = client
+        .set(
+            &created,
+            "replacement value",
+            None,
+            Some(SetOptions::NX),
+            false,
+        )
+        .await
+        .expect("reject duplicate key creation");
+    assert_eq!(created_again, None);
 
     client
         .rpush::<i64, _, _>(&list, vec!["first", "second"])
@@ -82,22 +100,95 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
         )
         .await
         .expect("create sorted-set value");
+    client
+        .custom::<RedisValue, _>(
+            CustomCommand::new("RPUSH", ClusterHash::FirstKey, false),
+            vec![list.clone(), "third".to_owned()],
+        )
+        .await
+        .expect("append to list");
+    client
+        .custom::<RedisValue, _>(
+            CustomCommand::new("HSET", ClusterHash::FirstKey, false),
+            vec![
+                hash.clone(),
+                "second-field".to_owned(),
+                "second-value".to_owned(),
+            ],
+        )
+        .await
+        .expect("add hash field");
+    client
+        .custom::<RedisValue, _>(
+            CustomCommand::new("SADD", ClusterHash::FirstKey, false),
+            vec![set.clone(), "second-member".to_owned()],
+        )
+        .await
+        .expect("add set member");
+    client
+        .custom::<RedisValue, _>(
+            CustomCommand::new("ZADD", ClusterHash::FirstKey, false),
+            vec![
+                sorted_set.clone(),
+                "3.0".to_owned(),
+                "second-score".to_owned(),
+            ],
+        )
+        .await
+        .expect("add sorted-set member");
 
     assert_eq!(
         read_key_value(&client, &list, "list").await.unwrap(),
-        KeyValue::List(vec!["first".to_owned(), "second".to_owned()])
+        KeyValue::List(vec![
+            "first".to_owned(),
+            "second".to_owned(),
+            "third".to_owned()
+        ])
     );
-    assert_eq!(
-        read_key_value(&client, &hash, "hash").await.unwrap(),
-        KeyValue::Hash(vec![("field".to_owned(), "value".to_owned())])
+    let hash_value = read_key_value(&client, &hash, "hash").await.unwrap();
+    assert!(
+        matches!(hash_value, KeyValue::Hash(fields) if fields.len() == 2 && fields.contains(&("field".to_owned(), "value".to_owned())))
     );
-    assert_eq!(
-        read_key_value(&client, &set, "set").await.unwrap(),
-        KeyValue::Set(vec!["member".to_owned()])
+    let set_value = read_key_value(&client, &set, "set").await.unwrap();
+    assert!(
+        matches!(set_value, KeyValue::Set(members) if members.len() == 2 && members.contains(&"member".to_owned()))
     );
+    let zset_value = read_key_value(&client, &sorted_set, "zset").await.unwrap();
+    assert!(
+        matches!(zset_value, KeyValue::SortedSet(members) if members.len() == 2 && members.contains(&("scored-member".to_owned(), 2.5)))
+    );
+
+    let list_removed: i64 = client
+        .custom(
+            CustomCommand::new("LREM", ClusterHash::FirstKey, false),
+            vec![list.clone(), "1".to_owned(), "first".to_owned()],
+        )
+        .await
+        .expect("remove list entry");
+    let hash_removed: i64 = client
+        .custom(
+            CustomCommand::new("HDEL", ClusterHash::FirstKey, false),
+            vec![hash.clone(), "field".to_owned()],
+        )
+        .await
+        .expect("remove hash field");
+    let set_removed: i64 = client
+        .custom(
+            CustomCommand::new("SREM", ClusterHash::FirstKey, false),
+            vec![set.clone(), "member".to_owned()],
+        )
+        .await
+        .expect("remove set member");
+    let sorted_set_removed: i64 = client
+        .custom(
+            CustomCommand::new("ZREM", ClusterHash::FirstKey, false),
+            vec![sorted_set.clone(), "scored-member".to_owned()],
+        )
+        .await
+        .expect("remove sorted-set member");
     assert_eq!(
-        read_key_value(&client, &sorted_set, "zset").await.unwrap(),
-        KeyValue::SortedSet(vec![("scored-member".to_owned(), 2.5)])
+        [list_removed, hash_removed, set_removed, sorted_set_removed],
+        [1, 1, 1, 1]
     );
 
     client
@@ -126,6 +217,7 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
         .del(&[
             destination.as_str(),
             occupied.as_str(),
+            created.as_str(),
             list.as_str(),
             hash.as_str(),
             set.as_str(),
@@ -133,6 +225,6 @@ async fn standalone_key_lifecycle_uses_valkey_protocol() {
         ])
         .await
         .expect("delete test keys");
-    assert_eq!(deleted, 6);
+    assert_eq!(deleted, 7);
     client.quit().await.expect("close test connection");
 }

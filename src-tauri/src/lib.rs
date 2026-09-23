@@ -7,7 +7,7 @@ use std::{
 use eframe::egui;
 use fred::{
     prelude::*,
-    types::{ClusterHash, CustomCommand, Expiration, Scanner},
+    types::{ClusterHash, CustomCommand, Expiration, Scanner, SetOptions},
 };
 use futures_util::TryStreamExt;
 use uuid::Uuid;
@@ -27,6 +27,8 @@ enum UiEvent {
     Disconnected(Result<(), String>),
     CommandResult(Result<String, String>),
     MonitorResult(Result<MonitorSnapshot, String>),
+    KeyUpdated(String, Result<(), String>),
+    KeyCreated(String, Result<(), String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -178,6 +180,16 @@ struct ValkeyManagerApp {
     command_input: String,
     command_output: String,
     monitor: Option<MonitorSnapshot>,
+    new_key_name: String,
+    new_key_value: String,
+    new_key_ttl: String,
+    list_item_input: String,
+    hash_field_input: String,
+    hash_value_input: String,
+    set_member_input: String,
+    sorted_member_input: String,
+    sorted_score_input: String,
+    pending_collection_remove: Option<(String, Vec<String>)>,
     sender: Sender<UiEvent>,
     receiver: Receiver<UiEvent>,
 }
@@ -221,6 +233,16 @@ impl Default for ValkeyManagerApp {
             command_input: String::new(),
             command_output: String::new(),
             monitor: None,
+            new_key_name: String::new(),
+            new_key_value: String::new(),
+            new_key_ttl: String::new(),
+            list_item_input: String::new(),
+            hash_field_input: String::new(),
+            hash_value_input: String::new(),
+            set_member_input: String::new(),
+            sorted_member_input: String::new(),
+            sorted_score_input: String::new(),
+            pending_collection_remove: None,
             sender,
             receiver,
         }
@@ -552,6 +574,63 @@ impl ValkeyManagerApp {
         });
     }
 
+    fn create_string_key(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let key = self.new_key_name.trim().to_owned();
+        if key.is_empty() {
+            self.status = "Enter a key name".to_owned();
+            return;
+        }
+        let ttl = match self.new_key_ttl.trim() {
+            "" => None,
+            value => match value.parse::<i64>() {
+                Ok(seconds) if seconds > 0 => Some(Expiration::EX(seconds)),
+                _ => {
+                    self.status = "TTL must be a positive number of seconds".to_owned();
+                    return;
+                }
+            },
+        };
+        let value = self.new_key_value.clone();
+        let sender = self.sender.clone();
+        self.status = format!("Creating {key}…");
+
+        self.runtime.spawn(async move {
+            let result = client
+                .set::<Option<String>, _, _>(&key, value, ttl, Some(SetOptions::NX), false)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|created| {
+                    created
+                        .map(|_| ())
+                        .ok_or_else(|| "A key with this name already exists".to_owned())
+                });
+            let _ = sender.send(UiEvent::KeyCreated(key, result));
+        });
+    }
+
+    fn run_collection_command(&mut self, command: String, arguments: Vec<String>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let key = self.selected_key.clone().unwrap_or_default();
+        let sender = self.sender.clone();
+        self.status = format!("Running {command} on {key}…");
+        self.runtime.spawn(async move {
+            let result = client
+                .custom::<RedisValue, _>(
+                    CustomCommand::new(&command, ClusterHash::FirstKey, false),
+                    arguments,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let _ = sender.send(UiEvent::KeyUpdated(key, result));
+        });
+    }
+
     fn run_console_command(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -620,6 +699,28 @@ impl ValkeyManagerApp {
             });
             return;
         }
+        ui.collapsing("Create string key", |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_key_name)
+                        .hint_text("key name")
+                        .desired_width(180.0),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_key_value)
+                        .hint_text("value")
+                        .desired_width(180.0),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_key_ttl)
+                        .hint_text("TTL seconds")
+                        .desired_width(110.0),
+                );
+                if ui.button("Create").clicked() {
+                    self.create_string_key();
+                }
+            });
+        });
         if self.keys.is_empty() {
             ui.label("No keys found for this pattern.");
         } else {
@@ -678,16 +779,64 @@ impl ValkeyManagerApp {
                 }
                 KeyValue::List(values) => {
                     ui.label("List entries (first 100)");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.list_item_input)
+                                .hint_text("append item")
+                                .desired_width(220.0),
+                        );
+                        if ui.button("Append").clicked() && !self.list_item_input.is_empty() {
+                            self.run_collection_command(
+                                "RPUSH".to_owned(),
+                                vec![key.clone(), self.list_item_input.clone()],
+                            );
+                            self.list_item_input.clear();
+                        }
+                    });
                     egui::ScrollArea::vertical()
                         .max_height(220.0)
                         .show(ui, |ui| {
                             for (index, value) in values.iter().enumerate() {
-                                ui.monospace(format!("{index}: {value}"));
+                                ui.horizontal(|ui| {
+                                    ui.monospace(format!("{index}: {value}"));
+                                    if ui.small_button("Remove").clicked() {
+                                        self.pending_collection_remove = Some((
+                                            "LREM".to_owned(),
+                                            vec![key.clone(), "1".to_owned(), value.clone()],
+                                        ));
+                                    }
+                                });
                             }
                         });
                 }
                 KeyValue::Hash(fields) => {
                     ui.label("Hash fields (first 100)");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.hash_field_input)
+                                .hint_text("field")
+                                .desired_width(160.0),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.hash_value_input)
+                                .hint_text("value")
+                                .desired_width(160.0),
+                        );
+                        if ui.button("Add / update field").clicked()
+                            && !self.hash_field_input.is_empty()
+                        {
+                            self.run_collection_command(
+                                "HSET".to_owned(),
+                                vec![
+                                    key.clone(),
+                                    self.hash_field_input.clone(),
+                                    self.hash_value_input.clone(),
+                                ],
+                            );
+                            self.hash_field_input.clear();
+                            self.hash_value_input.clear();
+                        }
+                    });
                     egui::ScrollArea::vertical()
                         .max_height(220.0)
                         .show(ui, |ui| {
@@ -696,22 +845,82 @@ impl ValkeyManagerApp {
                                     ui.monospace(field);
                                     ui.label("→");
                                     ui.monospace(value);
+                                    if ui.small_button("Remove").clicked() {
+                                        self.pending_collection_remove = Some((
+                                            "HDEL".to_owned(),
+                                            vec![key.clone(), field.clone()],
+                                        ));
+                                    }
                                 });
                             }
                         });
                 }
                 KeyValue::Set(members) => {
                     ui.label("Set members (first 100)");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.set_member_input)
+                                .hint_text("member")
+                                .desired_width(220.0),
+                        );
+                        if ui.button("Add member").clicked() && !self.set_member_input.is_empty() {
+                            self.run_collection_command(
+                                "SADD".to_owned(),
+                                vec![key.clone(), self.set_member_input.clone()],
+                            );
+                            self.set_member_input.clear();
+                        }
+                    });
                     egui::ScrollArea::vertical()
                         .max_height(220.0)
                         .show(ui, |ui| {
                             for member in members {
-                                ui.monospace(member);
+                                ui.horizontal(|ui| {
+                                    ui.monospace(member);
+                                    if ui.small_button("Remove").clicked() {
+                                        self.pending_collection_remove = Some((
+                                            "SREM".to_owned(),
+                                            vec![key.clone(), member.clone()],
+                                        ));
+                                    }
+                                });
                             }
                         });
                 }
                 KeyValue::SortedSet(members) => {
                     ui.label("Sorted-set members (first 100)");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.sorted_member_input)
+                                .hint_text("member")
+                                .desired_width(170.0),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.sorted_score_input)
+                                .hint_text("score")
+                                .desired_width(90.0),
+                        );
+                        if ui.button("Add / update score").clicked() {
+                            match self.sorted_score_input.parse::<f64>() {
+                                Ok(score)
+                                    if score.is_finite()
+                                        && !self.sorted_member_input.is_empty() =>
+                                {
+                                    self.run_collection_command(
+                                        "ZADD".to_owned(),
+                                        vec![
+                                            key.clone(),
+                                            score.to_string(),
+                                            self.sorted_member_input.clone(),
+                                        ],
+                                    );
+                                    self.sorted_member_input.clear();
+                                    self.sorted_score_input.clear();
+                                }
+                                _ => self.status = "Enter a member and numeric score".to_owned(),
+                            }
+                        }
+                    });
                     egui::ScrollArea::vertical()
                         .max_height(220.0)
                         .show(ui, |ui| {
@@ -719,6 +928,12 @@ impl ValkeyManagerApp {
                                 ui.horizontal(|ui| {
                                     ui.monospace(member);
                                     ui.label(format!("score: {score}"));
+                                    if ui.small_button("Remove").clicked() {
+                                        self.pending_collection_remove = Some((
+                                            "ZREM".to_owned(),
+                                            vec![key.clone(), member.clone()],
+                                        ));
+                                    }
                                 });
                             }
                         });
@@ -729,6 +944,22 @@ impl ValkeyManagerApp {
                         details.kind
                     ));
                 }
+            }
+
+            if let Some((command, arguments)) = self.pending_collection_remove.clone() {
+                let target = arguments.last().cloned().unwrap_or_default();
+                ui.group(|ui| {
+                    ui.label(format!("Remove {target} from this key?"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Confirm remove").clicked() {
+                            self.pending_collection_remove = None;
+                            self.run_collection_command(command, arguments);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.pending_collection_remove = None;
+                        }
+                    });
+                });
             }
 
             ui.horizontal(|ui| {
@@ -925,6 +1156,22 @@ impl ValkeyManagerApp {
                     self.status = "Server metrics updated".to_owned();
                 }
                 UiEvent::MonitorResult(Err(error)) => self.status = error,
+                UiEvent::KeyUpdated(key, Ok(())) => {
+                    if self.selected_key.as_deref() == Some(&key) {
+                        self.status = format!("Updated {key}");
+                        self.load_key(key);
+                    }
+                }
+                UiEvent::KeyUpdated(_, Err(error)) => self.status = error,
+                UiEvent::KeyCreated(key, Ok(())) => {
+                    self.new_key_name.clear();
+                    self.new_key_value.clear();
+                    self.new_key_ttl.clear();
+                    self.status = format!("Created {key}");
+                    self.scan_keys();
+                    self.load_key(key);
+                }
+                UiEvent::KeyCreated(_, Err(error)) => self.status = error,
             }
         }
     }
