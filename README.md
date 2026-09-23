@@ -12,8 +12,10 @@ cargo run
 ```
 
 The current native UI supports saved standalone connections, password storage in the
-operating system keychain, and key scans using a glob pattern. Connection work runs
-asynchronously so network operations do not block the UI.
+operating system keychain, a glob-based browser (up to 500 keys per scan), key type
+and TTL inspection, string value editing, safe rename, and confirmed deletion.
+Connection and key operations run asynchronously so network work does not block the
+UI.
 
 For authenticated servers, enter the URL (for example `rediss://user@host:6380`),
 enter the password in the masked password field, and save the profile. The profile
@@ -24,6 +26,6 @@ keychain.
 
 The original Tauri/Vue implementation is preserved in the repository while its
 functionality is migrated to the native egui app. The current egui slice provides
-standalone connection profiles, keychain-backed credentials, and key browsing;
-key inspection/editing, commands, monitoring, and Sentinel/Cluster support remain to
-be migrated.
+standalone connection profiles, keychain-backed credentials, and basic key browsing
+and string operations. Collection value editors, commands, monitoring, and
+Sentinel/Cluster support remain to be migrated.

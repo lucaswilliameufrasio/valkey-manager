@@ -5,16 +5,33 @@ use std::{
 };
 
 use eframe::egui;
-use fred::{prelude::*, types::Scanner};
+use fred::{
+    prelude::*,
+    types::{ClusterHash, CustomCommand, Expiration, Scanner},
+};
 use futures_util::TryStreamExt;
 use uuid::Uuid;
 
 mod profile;
 use profile::ConnectionProfile;
 
+const MAX_KEYS_PER_SCAN: usize = 500;
+
 enum UiEvent {
     Connected(Result<RedisClient, String>),
     Keys(Result<Vec<String>, String>),
+    KeyDetails(String, Result<KeyDetails, String>),
+    KeySaved(String, Result<(), String>),
+    KeyDeleted(String, Result<(), String>),
+    KeyRenamed(String, String, Result<(), String>),
+    Disconnected(Result<(), String>),
+}
+
+#[derive(Clone)]
+struct KeyDetails {
+    kind: String,
+    ttl_seconds: i64,
+    value: Option<String>,
 }
 
 struct ValkeyManagerApp {
@@ -29,6 +46,12 @@ struct ValkeyManagerApp {
     profiles: Vec<ConnectionProfile>,
     selected_profile: Option<Uuid>,
     keys: Vec<String>,
+    selected_key: Option<String>,
+    key_details: Option<KeyDetails>,
+    key_value: String,
+    ttl_input: String,
+    rename_input: String,
+    confirm_delete: bool,
     sender: Sender<UiEvent>,
     receiver: Receiver<UiEvent>,
 }
@@ -62,6 +85,12 @@ impl Default for ValkeyManagerApp {
             selected_profile: selected.map(|profile| profile.id),
             profiles,
             keys: Vec::new(),
+            selected_key: None,
+            key_details: None,
+            key_value: String::new(),
+            ttl_input: String::new(),
+            rename_input: String::new(),
+            confirm_delete: false,
             sender,
             receiver,
         }
@@ -218,10 +247,26 @@ impl ValkeyManagerApp {
         });
     }
 
+    fn disconnect(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.status = "Disconnecting…".to_owned();
+        let sender = self.sender.clone();
+        self.runtime.spawn(async move {
+            let result = client.quit().await.map_err(|error| error.to_string());
+            let _ = sender.send(UiEvent::Disconnected(result));
+        });
+    }
+
     fn scan_keys(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
         };
+        self.selected_key = None;
+        self.key_details = None;
+        self.key_value.clear();
+        self.ttl_input.clear();
         let pattern = self.pattern.trim().to_owned();
         let sender = self.sender.clone();
         self.status = "Scanning keys…".to_owned();
@@ -236,11 +281,16 @@ impl ValkeyManagerApp {
                     .map_err(|error| error.to_string())?
                 {
                     if let Some(results) = page.take_results() {
+                        let remaining = MAX_KEYS_PER_SCAN.saturating_sub(keys.len());
                         keys.extend(
                             results
                                 .into_iter()
+                                .take(remaining)
                                 .map(|key| key.as_str_lossy().to_string()),
                         );
+                    }
+                    if keys.len() >= MAX_KEYS_PER_SCAN {
+                        break;
                     }
                     page.next().map_err(|error| error.to_string())?;
                 }
@@ -248,6 +298,134 @@ impl ValkeyManagerApp {
             }
             .await;
             let _ = sender.send(UiEvent::Keys(result));
+        });
+    }
+
+    fn load_key(&mut self, key: String) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.selected_key = Some(key.clone());
+        self.key_details = None;
+        self.key_value.clear();
+        self.ttl_input.clear();
+        self.rename_input = key.clone();
+        self.status = format!("Loading {key}…");
+        let sender = self.sender.clone();
+
+        self.runtime.spawn(async move {
+            let result = async {
+                let kind: String = client
+                    .custom(
+                        CustomCommand::new("TYPE", ClusterHash::FirstKey, false),
+                        vec![key.clone()],
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let ttl_seconds = client.ttl(&key).await.map_err(|error| error.to_string())?;
+                let value = if kind == "string" {
+                    client
+                        .get::<Option<String>, _>(&key)
+                        .await
+                        .map_err(|error| error.to_string())?
+                } else {
+                    None
+                };
+                Ok(KeyDetails {
+                    kind,
+                    ttl_seconds,
+                    value,
+                })
+            }
+            .await;
+            let _ = sender.send(UiEvent::KeyDetails(key, result));
+        });
+    }
+
+    fn save_selected_string(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(key) = self.selected_key.clone() else {
+            return;
+        };
+        let ttl_seconds = match self.ttl_input.trim() {
+            "" => None,
+            value => match value.parse::<i64>() {
+                Ok(seconds) if seconds > 0 => Some(seconds),
+                _ => {
+                    self.status = "TTL must be a positive number of seconds".to_owned();
+                    return;
+                }
+            },
+        };
+        let value = self.key_value.clone();
+        let sender = self.sender.clone();
+        self.status = format!("Saving {key}…");
+
+        self.runtime.spawn(async move {
+            let result = async {
+                if let Some(seconds) = ttl_seconds {
+                    client
+                        .set::<(), _, _>(&key, value, Some(Expiration::EX(seconds)), None, false)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    client
+                        .set::<(), _, _>(&key, value, None, None, false)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            }
+            .await;
+            let _ = sender.send(UiEvent::KeySaved(key, result));
+        });
+    }
+
+    fn delete_selected_key(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(key) = self.selected_key.clone() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        self.confirm_delete = false;
+        self.status = format!("Deleting {key}…");
+
+        self.runtime.spawn(async move {
+            let result = client
+                .del::<i64, _>(&[key.as_str()])
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let _ = sender.send(UiEvent::KeyDeleted(key, result));
+        });
+    }
+
+    fn rename_selected_key(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(key) = self.selected_key.clone() else {
+            return;
+        };
+        let new_key = self.rename_input.trim().to_owned();
+        if new_key.is_empty() || new_key == key {
+            self.status = "Enter a different, non-empty key name".to_owned();
+            return;
+        }
+        let sender = self.sender.clone();
+        self.status = format!("Renaming {key}…");
+
+        self.runtime.spawn(async move {
+            let result: Result<(), String> = match client.renamenx(&key, &new_key).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("Destination key already exists".to_owned()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = sender.send(UiEvent::KeyRenamed(key, new_key, result));
         });
     }
 
@@ -271,8 +449,66 @@ impl ValkeyManagerApp {
                 }
                 UiEvent::Keys(Ok(keys)) => {
                     self.keys = keys;
-                    self.status = format!("Connected · {} keys", self.keys.len());
+                    self.status = if self.keys.len() >= MAX_KEYS_PER_SCAN {
+                        format!("Connected · {}+ keys", self.keys.len())
+                    } else {
+                        format!("Connected · {} keys", self.keys.len())
+                    };
                 }
+                UiEvent::KeyDetails(key, Ok(details)) => {
+                    if self.selected_key.as_deref() == Some(&key) {
+                        self.key_value = details.value.clone().unwrap_or_default();
+                        self.ttl_input = if details.ttl_seconds > 0 {
+                            details.ttl_seconds.to_string()
+                        } else {
+                            String::new()
+                        };
+                        self.rename_input = key.clone();
+                        self.status = format!("Loaded {key}");
+                        self.key_details = Some(details);
+                    }
+                }
+                UiEvent::KeyDetails(key, Err(error)) => {
+                    if self.selected_key.as_deref() == Some(&key) {
+                        self.status = error;
+                        self.key_details = None;
+                    }
+                }
+                UiEvent::KeySaved(key, Ok(())) => {
+                    if self.selected_key.as_deref() == Some(&key) {
+                        self.status = format!("Saved {key}");
+                        self.load_key(key);
+                    }
+                }
+                UiEvent::KeySaved(_, Err(error)) => self.status = error,
+                UiEvent::KeyDeleted(key, Ok(())) => {
+                    if self.selected_key.as_deref() == Some(&key) {
+                        self.selected_key = None;
+                        self.key_details = None;
+                        self.key_value.clear();
+                        self.keys.retain(|existing| existing != &key);
+                        self.status = format!("Deleted {key}");
+                        self.scan_keys();
+                    }
+                }
+                UiEvent::KeyDeleted(_, Err(error)) => self.status = error,
+                UiEvent::KeyRenamed(old_key, new_key, Ok(())) => {
+                    if self.selected_key.as_deref() == Some(&old_key) {
+                        self.selected_key = Some(new_key.clone());
+                        self.status = format!("Renamed {old_key} to {new_key}");
+                        self.scan_keys();
+                        self.load_key(new_key);
+                    }
+                }
+                UiEvent::KeyRenamed(_, _, Err(error)) => self.status = error,
+                UiEvent::Disconnected(Ok(())) => {
+                    self.client = None;
+                    self.keys.clear();
+                    self.selected_key = None;
+                    self.key_details = None;
+                    self.status = "Not connected".to_owned();
+                }
+                UiEvent::Disconnected(Err(error)) => self.status = error,
             }
         }
     }
@@ -355,6 +591,9 @@ impl eframe::App for ValkeyManagerApp {
                 }
                 if self.client.is_some() {
                     columns[0].label("Connection is active");
+                    if columns[0].button("Disconnect").clicked() {
+                        self.disconnect();
+                    }
                 }
                 columns[0].add_space(16.0);
                 columns[0].label("Key pattern");
@@ -379,15 +618,90 @@ impl eframe::App for ValkeyManagerApp {
                 } else if self.keys.is_empty() {
                     columns[1].label("No keys found for this pattern.");
                 } else {
+                    let mut requested_key = None;
                     egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
                         for key in &self.keys {
-                            ui.horizontal(|ui| {
-                                ui.label("◆");
-                                ui.monospace(key);
-                            });
-                            ui.separator();
+                            if ui
+                                .selectable_label(self.selected_key.as_ref() == Some(key), key)
+                                .clicked()
+                            {
+                                requested_key = Some(key.clone());
+                            }
                         }
                     });
+                    if let Some(key) = requested_key {
+                        self.load_key(key);
+                    }
+                }
+
+                if let (Some(key), Some(details)) =
+                    (self.selected_key.clone(), self.key_details.clone())
+                {
+                    columns[1].separator();
+                    columns[1].horizontal(|ui| {
+                        ui.heading("Key details");
+                        ui.monospace(&key);
+                    });
+                    let ttl = match details.ttl_seconds {
+                        -2 => "Missing".to_owned(),
+                        -1 => "Persistent".to_owned(),
+                        seconds => format!("{seconds}s"),
+                    };
+                    columns[1].horizontal(|ui| {
+                        ui.label(format!("Type: {}", details.kind));
+                        ui.separator();
+                        ui.label(format!("TTL: {ttl}"));
+                    });
+
+                    if details.kind == "string" {
+                        columns[1].label("Value");
+                        columns[1].add(
+                            egui::TextEdit::multiline(&mut self.key_value)
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY),
+                        );
+                        columns[1].horizontal(|ui| {
+                            ui.label("TTL seconds (blank = persistent)");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.ttl_input)
+                                    .desired_width(100.0),
+                            );
+                            if ui.button("Save value").clicked() {
+                                self.save_selected_string();
+                            }
+                        });
+                    } else {
+                        columns[1].label(format!(
+                            "The {} value viewer is not available yet.",
+                            details.kind
+                        ));
+                    }
+
+                    columns[1].horizontal(|ui| {
+                        ui.label("Rename to");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.rename_input).desired_width(220.0),
+                        );
+                        if ui.button("Rename safely").clicked() {
+                            self.rename_selected_key();
+                        }
+                        if ui.button("Delete…").clicked() {
+                            self.confirm_delete = true;
+                        }
+                    });
+                    if self.confirm_delete {
+                        columns[1].group(|ui| {
+                            ui.label(format!("Permanently delete {key}?"));
+                            ui.horizontal(|ui| {
+                                if ui.button("Confirm delete").clicked() {
+                                    self.delete_selected_key();
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.confirm_delete = false;
+                                }
+                            });
+                        });
+                    }
                 }
             });
         });
