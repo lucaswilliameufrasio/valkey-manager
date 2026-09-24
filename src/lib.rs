@@ -1309,7 +1309,8 @@ pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([760.0, 480.0]),
+            .with_min_inner_size([760.0, 480.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -1319,6 +1320,18 @@ pub fn run() -> eframe::Result {
     )
 }
 
+fn app_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../assets/icons/valkey-manager.png"))
+        .expect("embedded Valkey Manager icon is a valid image")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1326,6 +1339,13 @@ mod tests {
     #[test]
     fn default_endpoint_is_a_valid_valkey_url() {
         assert!(RedisConfig::from_url("redis://127.0.0.1:6379").is_ok());
+    }
+
+    #[test]
+    fn embedded_app_icon_has_rgba_pixels() {
+        let icon = app_icon();
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
+        assert_eq!((icon.width, icon.height), (128, 128));
     }
 
     #[test]

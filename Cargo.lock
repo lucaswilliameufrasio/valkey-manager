@@ -3577,6 +3577,7 @@ dependencies = [
  "eframe",
  "fred",
  "futures-util",
+ "image",
  "keyring",
  "serde",
  "shlex",

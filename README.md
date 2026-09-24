@@ -1,5 +1,7 @@
 # Valkey Manager
 
+![Valkey Manager logo](assets/brand/valkey-manager-wordmark.svg)
+
 Native desktop client for Valkey, built with Rust, egui/eframe, and `fred`.
 
 ## Run
@@ -10,6 +12,20 @@ windowing and OpenGL backends, then run from the repository root:
 ```sh
 cargo run
 ```
+
+## Run a local Valkey 9 for testing
+
+With Docker installed, this starts Valkey on an available loopback port, waits for
+it to answer `PING`, then prints the connection URL to enter in the app:
+
+```sh
+docker run --detach --rm --name valkey-manager-test --publish 127.0.0.1::6379 valkey/valkey:9
+until [ "$(docker exec valkey-manager-test valkey-cli ping 2>/dev/null)" = "PONG" ]; do sleep 1; done
+host_port="$(docker port valkey-manager-test 6379/tcp | sed 's/.*://')"
+printf 'Connection string: redis://127.0.0.1:%s\n' "$host_port"
+```
+
+Stop the temporary server when finished with `docker stop valkey-manager-test`.
 
 ## Install a release
 

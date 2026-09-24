@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 300" role="img" aria-labelledby="title">
+  <title id="title">Valkey Manager</title>
+  <defs>
+    <linearGradient id="valkey" x1="32" y1="24" x2="230" y2="258" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#36DEC5"/>
+      <stop offset="1" stop-color="#B9EF61"/>
+    </linearGradient>
+    <radialGradient id="surface" cx="0" cy="0" r="1" gradientTransform="matrix(256 256 -256 256 0 0)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18343A"/>
+      <stop offset="1" stop-color="#0A171C"/>
+    </radialGradient>
+  </defs>
+
+  <g transform="translate(12 12)">
+    <rect width="256" height="256" rx="56" fill="url(#surface)"/>
+    <rect x="4" y="4" width="248" height="248" rx="53" fill="none" stroke="#DDFBF2" stroke-opacity=".08" stroke-width="2"/>
+    <path d="M72 69 128 184 184 69" fill="none" stroke="url(#valkey)" stroke-linecap="round" stroke-linejoin="round" stroke-width="25"/>
+    <g fill="#FFC85A">
+      <circle cx="94" cy="105" r="4.5"/>
+      <circle cx="107" cy="131" r="4.5"/>
+      <circle cx="120" cy="157" r="4.5"/>
+    </g>
+    <g fill="none" stroke="#F4FBF8" stroke-linecap="round" stroke-opacity=".92" stroke-width="6.5">
+      <path d="M106 105h44"/>
+      <path d="M119 131h32"/>
+      <path d="M132 157h20"/>
+    </g>
+  </g>
+
+  <text x="315" y="142" fill="#F3FAF7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="86" font-weight="700" letter-spacing="-2">Valkey</text>
+  <text x="322" y="205" fill="#7FE0C7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="30" font-weight="600" letter-spacing="8">MANAGER</text>
+</svg>
