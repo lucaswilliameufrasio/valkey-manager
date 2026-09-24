@@ -129,9 +129,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$REPOSITORY"
           else
-            gh release create "$TAG" dist/* --verify-tag --generate-notes
+            gh release create "$TAG" dist/* --repo "$REPOSITORY" --verify-tag --generate-notes
           fi
