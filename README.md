@@ -1,5 +1,7 @@
 # Valkey Manager
 
+![Valkey Manager logo](assets/brand/valkey-manager-wordmark.svg)
+
 Native desktop client for Valkey, built with Rust, egui/eframe, and `fred`.
 
 ## Run
