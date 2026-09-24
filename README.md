@@ -16,7 +16,7 @@ cargo run
 - **Linux:** download the `.AppImage`, make it executable with `chmod +x`, then run it.
 - **macOS:** open the `.dmg` and drag Valkey Manager to Applications. The `.app.zip` is an alternative.
 
-The macOS app is currently unsigned; Gatekeeper may require Control-click → Open on first launch.
+The macOS app is currently unsigned and not notarized. If Gatekeeper says it is damaged, use the app-specific quarantine workaround and signing setup in [macOS Gatekeeper and signing](docs/macos-gatekeeper.md).
 
 The current native UI supports saved standalone connections, password storage in the
 operating system keychain, a glob-based browser (up to 500 keys per scan), key type
