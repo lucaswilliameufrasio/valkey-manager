@@ -1,6 +1,6 @@
 ---
 name: system-module-architecture
-description: Define and review modular system architecture across web, mobile, API, and operational products. Use before creating or refactoring modules, routes, screens, workflows, or service boundaries.
+description: Define and review modular architecture across applications and operational products. Use before creating or refactoring domain capabilities, screens, workflows, or service boundaries.
 ---
 
 # System Module Architecture
@@ -41,7 +41,7 @@ topology by extracting components from a giant page.
 
 - APIs model domain commands and queries, not arbitrary upstream paths.
 - Do not create catch-all proxies or forward arbitrary methods, query strings,
-  headers, bodies, or `RequestInit` values to internal services.
+  headers, bodies, or untyped transport options to internal services.
 - Every integration has a named client, explicit operations, request types,
   response types, validation, timeout, authorization, and safe errors.
 - External data is parsed at the boundary and mapped to domain models before it
@@ -51,10 +51,11 @@ topology by extracting components from a giant page.
 
 ## Form And Workflow Rules
 
-- Every new or modified form has a schema, field-level errors, submit state,
-  server-side validation, and an explicit success or failure state.
-- In TypeScript/Svelte projects, use Felte with Valibot for form state and
-  runtime validation unless the stack has an established equivalent.
+- Every new or modified form has a typed input contract, field-level validation,
+  submit state, validation at the authoritative boundary, and explicit success
+  or failure state.
+- Use the stack's established schema and form-validation tools; keep domain
+  validation independent of the UI framework.
 - Long-running and destructive commands require explicit confirmation,
   authorization, idempotency where applicable, and progress or final state.
 

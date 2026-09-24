@@ -3,7 +3,7 @@
 The project-wide architecture standard lives in
 [`.agents/skills/system-module-architecture/SKILL.md`](../.agents/skills/system-module-architecture/SKILL.md).
 Use it before adding a major screen, Valkey capability, or connection topology.
-The skill's Felte/Valibot example is specific to TypeScript; apply its equivalent
+The skill is stack-neutral; apply its typed-contract and field-validation guidance
 through Rust types, validation functions, and egui async state in this project.
 
 ## Current capability boundaries
