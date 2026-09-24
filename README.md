@@ -13,6 +13,20 @@ windowing and OpenGL backends, then run from the repository root:
 cargo run
 ```
 
+## Run a local Valkey 9 for testing
+
+With Docker installed, this starts Valkey on an available loopback port, waits for
+it to answer `PING`, then prints the connection URL to enter in the app:
+
+```sh
+docker run --detach --rm --name valkey-manager-test --publish 127.0.0.1::6379 valkey/valkey:9
+until [ "$(docker exec valkey-manager-test valkey-cli ping 2>/dev/null)" = "PONG" ]; do sleep 1; done
+host_port="$(docker port valkey-manager-test 6379/tcp | sed 's/.*://')"
+printf 'Connection string: redis://127.0.0.1:%s\n' "$host_port"
+```
+
+Stop the temporary server when finished with `docker stop valkey-manager-test`.
+
 ## Install a release
 
 - **Linux:** download the `.AppImage`, make it executable with `chmod +x`, then run it.
