@@ -1,3 +1,4 @@
+// Native egui application and Valkey client services.
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     sync::Arc,

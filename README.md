@@ -31,10 +31,8 @@ enter the password in the masked password field, and save the profile. The profi
 file stores the endpoint without its password; the secret stays in the system
 keychain.
 
-## Current migration status
+## Application architecture
 
-The original Tauri/Vue implementation is preserved in the repository while its
-functionality is migrated to the native egui app. The current egui slice provides
-standalone connection profiles, keychain-backed credentials, and basic key browsing
-and collection operations, console, and monitoring. Sentinel/Cluster support remains
-to be migrated.
+Valkey Manager is a native Rust/egui desktop application; the active application does
+not use Tauri, a webview, or a JavaScript frontend. Current connections support
+standalone Valkey endpoints. Sentinel, Cluster, and Pub/Sub support remain future work.

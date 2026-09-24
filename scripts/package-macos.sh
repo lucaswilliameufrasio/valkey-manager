@@ -41,7 +41,7 @@ fi
 
 mkdir -p "$contents/MacOS" "$contents/Resources" "$tmp_dir/dmg-root" "$dist_dir"
 cp "$binary" "$contents/MacOS/valkey-manager"
-cp "$repo_root/src-tauri/icons/icon.icns" "$contents/Resources/icon.icns"
+cp "$repo_root/assets/icons/valkey-manager.icns" "$contents/Resources/icon.icns"
 
 cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

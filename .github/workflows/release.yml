@@ -77,7 +77,7 @@ jobs:
           from pathlib import Path
 
           tag = os.environ["TAG"]
-          manifest = Path("src-tauri/Cargo.toml").read_text()
+          manifest = Path("Cargo.toml").read_text()
           match = re.search(r'(?m)^version = "([^"]+)"$', manifest)
           if match is None or tag != f"v{match.group(1)}":
               current = match.group(1) if match else "unknown"

@@ -33,7 +33,7 @@ mkdir -p \
     "$tool_dir" \
     "$dist_dir"
 cp "$binary" "$appdir/usr/bin/valkey-manager"
-cp "$repo_root/src-tauri/icons/128x128.png" \
+cp "$repo_root/assets/icons/valkey-manager.png" \
     "$appdir/usr/share/icons/hicolor/128x128/apps/valkey-manager.png"
 
 cat > "$appdir/usr/share/applications/valkey-manager.desktop" <<'DESKTOP'
@@ -58,7 +58,7 @@ chmod +x "$linuxdeploy"
         --appdir "$appdir" \
         --executable "$appdir/usr/bin/valkey-manager" \
         --desktop-file "$appdir/usr/share/applications/valkey-manager.desktop" \
-        --icon-file "$repo_root/src-tauri/icons/128x128.png" \
+        --icon-file "$repo_root/assets/icons/valkey-manager.png" \
         --output appimage
 )
 
