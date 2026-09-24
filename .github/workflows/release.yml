@@ -71,12 +71,18 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml", "rb"))["package"]["version"])')"
-          tag_version="${TAG#v}"
-          if [[ "$tag_version" != "$package_version" ]]; then
-            echo "tag v$tag_version does not match package version $package_version on main" >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          manifest = Path("src-tauri/Cargo.toml").read_text()
+          match = re.search(r'(?m)^version = "([^"]+)"$', manifest)
+          if match is None or tag != f"v{match.group(1)}":
+              current = match.group(1) if match else "unknown"
+              raise SystemExit(f"tag {tag} does not match package version {current} on main")
+          PY
 
       - name: Package Linux AppImage
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -123,9 +129,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$REPOSITORY"
           else
-            gh release create "$TAG" dist/* --verify-tag --generate-notes
+            gh release create "$TAG" dist/* --repo "$REPOSITORY" --verify-tag --generate-notes
           fi
