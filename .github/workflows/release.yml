@@ -88,7 +88,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           TARGET: ${{ matrix.target }}
-          VERSION: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '0.0.0' }}
         run: bash scripts/package-macos.sh
 
       - name: Upload release artifacts
