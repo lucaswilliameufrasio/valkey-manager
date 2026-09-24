@@ -56,6 +56,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check packaging scripts
+        run: bash -n scripts/package-appimage.sh scripts/package-macos.sh
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
