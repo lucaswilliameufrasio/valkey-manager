@@ -16,7 +16,7 @@ cargo run
 - **Linux:** download the `.AppImage`, make it executable with `chmod +x`, then run it.
 - **macOS:** open the `.dmg` and drag Valkey Manager to Applications. The `.app.zip` is an alternative.
 
-The macOS app is currently unsigned; Gatekeeper may require Control-click → Open on first launch.
+The macOS app is currently unsigned and not notarized. If Gatekeeper says it is damaged, use the app-specific quarantine workaround and signing setup in [macOS Gatekeeper and signing](docs/macos-gatekeeper.md).
 
 The current native UI supports saved standalone connections, password storage in the
 operating system keychain, a glob-based browser (up to 500 keys per scan), key type
@@ -31,10 +31,8 @@ enter the password in the masked password field, and save the profile. The profi
 file stores the endpoint without its password; the secret stays in the system
 keychain.
 
-## Current migration status
+## Application architecture
 
-The original Tauri/Vue implementation is preserved in the repository while its
-functionality is migrated to the native egui app. The current egui slice provides
-standalone connection profiles, keychain-backed credentials, and basic key browsing
-and collection operations, console, and monitoring. Sentinel/Cluster support remains
-to be migrated.
+Valkey Manager is a native Rust/egui desktop application; the active application does
+not use Tauri, a webview, or a JavaScript frontend. Current connections support
+standalone Valkey endpoints. Sentinel, Cluster, and Pub/Sub support remain future work.

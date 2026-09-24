@@ -1,3 +1,4 @@
+// Exercises real Fred commands against a local Valkey service.
 use fred::{
     prelude::*,
     types::{ClusterHash, CustomCommand, Expiration, SetOptions},

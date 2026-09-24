@@ -1,3 +1,4 @@
+// Local connection-profile storage and secure credential access.
 use std::{
     fs,
     path::{Path, PathBuf},
