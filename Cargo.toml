@@ -1,6 +1,6 @@
 [package]
 name = "valkey-manager"
-version = "0.1.1"
+version = "0.1.2"
 description = "Native desktop client for Valkey"
 authors = ["Lucas Eufrasio"]
 edition = "2021"
