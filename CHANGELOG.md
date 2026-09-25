@@ -1,6 +1,12 @@
 # Changelog
 
 Notable changes to Valkey Manager are documented here.
+## [0.3.0] - 2026-09-25
+
+### Features
+
+- Refine desktop UI and add Valkey performance tooling
+
 ## [0.1.2] - 2026-09-25
 
 ### Documentation
