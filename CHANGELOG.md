@@ -1,6 +1,14 @@
 # Changelog
 
 Notable changes to Valkey Manager are documented here.
+## [0.1.2] - 2026-09-25
+
+### Documentation
+
+- *(architecture)* Add system module architecture guidance
+
+- *(architecture)* Generalize module skill guidance
+
 ## [0.1.1] - 2026-09-24
 
 ### Bug Fixes
