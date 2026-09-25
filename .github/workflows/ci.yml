@@ -67,3 +67,36 @@ jobs:
 
       - name: Build application
         run: cargo build --workspace --locked
+
+  valkey-performance-e2e:
+    name: Valkey 9 performance E2E
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libasound2-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - name: Run E2E performance checks against Valkey 9
+        run: bash scripts/test-e2e-performance.sh

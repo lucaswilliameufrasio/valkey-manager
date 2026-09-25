@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod profile;
 use profile::ConnectionProfile;
+mod visual;
 
 const MAX_KEYS_PER_SCAN: usize = 500;
 
@@ -159,6 +160,33 @@ pub async fn read_key_value(
     }
 }
 
+pub async fn scan_key_names(client: &RedisClient, pattern: &str) -> Result<Vec<String>, String> {
+    let mut scanner = client.scan(pattern.to_owned(), Some(100), None);
+    let mut keys = Vec::new();
+
+    while let Some(mut page) = scanner
+        .try_next()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        if let Some(results) = page.take_results() {
+            let remaining = MAX_KEYS_PER_SCAN.saturating_sub(keys.len());
+            keys.extend(
+                results
+                    .into_iter()
+                    .take(remaining)
+                    .map(|key| key.as_str_lossy().to_string()),
+            );
+        }
+        if keys.len() >= MAX_KEYS_PER_SCAN {
+            break;
+        }
+        page.next().map_err(|error| error.to_string())?;
+    }
+
+    Ok(keys)
+}
+
 struct ValkeyManagerApp {
     endpoint: String,
     password: String,
@@ -191,6 +219,7 @@ struct ValkeyManagerApp {
     sorted_member_input: String,
     sorted_score_input: String,
     pending_collection_remove: Option<(String, Vec<String>)>,
+    brand_mark: Option<egui::TextureHandle>,
     sender: Sender<UiEvent>,
     receiver: Receiver<UiEvent>,
 }
@@ -206,7 +235,7 @@ impl Default for ValkeyManagerApp {
         Self {
             endpoint: selected
                 .map(|profile| profile.endpoint.clone())
-                .unwrap_or_else(|| "redis://127.0.0.1:6379".to_owned()),
+                .unwrap_or_else(|| "redis://127.0.0.1:16479".to_owned()),
             password: String::new(),
             pattern: "*".to_owned(),
             profile_name: selected
@@ -244,6 +273,7 @@ impl Default for ValkeyManagerApp {
             sorted_member_input: String::new(),
             sorted_score_input: String::new(),
             pending_collection_remove: None,
+            brand_mark: None,
             sender,
             receiver,
         }
@@ -267,7 +297,7 @@ impl ValkeyManagerApp {
     fn new_profile(&mut self) {
         self.select_profile(None);
         self.profile_name = "New Valkey".to_owned();
-        self.endpoint = "redis://127.0.0.1:6379".to_owned();
+        self.endpoint = "redis://127.0.0.1:16479".to_owned();
         self.password.clear();
     }
 
@@ -425,31 +455,7 @@ impl ValkeyManagerApp {
         self.status = "Scanning keys…".to_owned();
 
         self.runtime.spawn(async move {
-            let result = async {
-                let mut scanner = client.scan(pattern, Some(100), None);
-                let mut keys = Vec::new();
-                while let Some(mut page) = scanner
-                    .try_next()
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    if let Some(results) = page.take_results() {
-                        let remaining = MAX_KEYS_PER_SCAN.saturating_sub(keys.len());
-                        keys.extend(
-                            results
-                                .into_iter()
-                                .take(remaining)
-                                .map(|key| key.as_str_lossy().to_string()),
-                        );
-                    }
-                    if keys.len() >= MAX_KEYS_PER_SCAN {
-                        break;
-                    }
-                    page.next().map_err(|error| error.to_string())?;
-                }
-                Ok(keys)
-            }
-            .await;
+            let result = scan_key_names(&client, &pattern).await;
             let _ = sender.send(UiEvent::Keys(result));
         });
     }
@@ -692,50 +698,138 @@ impl ValkeyManagerApp {
     }
 
     fn render_keys(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Key browser");
-        ui.separator();
         if self.client.is_none() {
-            ui.centered_and_justified(|ui| {
-                ui.label("Connect to a Valkey instance to browse its keys.");
+            ui.vertical_centered(|ui| {
+                ui.add_space(52.0);
+                ui.label(egui::RichText::new("◈").size(42.0).color(visual::MINT));
+                ui.add_space(8.0);
+                ui.heading("Connect to explore your keyspace");
+                ui.label(
+                    egui::RichText::new(
+                        "Choose a Valkey profile on the left, then browse keys with a bounded scan.",
+                    )
+                    .color(visual::MUTED),
+                );
             });
             return;
         }
-        ui.collapsing("Create string key", |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_key_name)
-                        .hint_text("key name")
-                        .desired_width(180.0),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_key_value)
-                        .hint_text("value")
-                        .desired_width(180.0),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_key_ttl)
-                        .hint_text("TTL seconds")
-                        .desired_width(110.0),
-                );
-                if ui.button("Create").clicked() {
-                    self.create_string_key();
-                }
+
+        ui.horizontal(|ui| {
+            ui.heading("Keyspace");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if self.keys.len() >= MAX_KEYS_PER_SCAN {
+                    format!("{}+ shown", self.keys.len())
+                } else {
+                    format!("{} keys", self.keys.len())
+                };
+                egui::Frame::new()
+                    .fill(visual::MINT_DARK)
+                    .corner_radius(egui::CornerRadius::same(20))
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(label)
+                                .size(12.0)
+                                .strong()
+                                .color(visual::MINT),
+                        );
+                    });
             });
         });
+        ui.label(
+            egui::RichText::new("Search and inspect live keys on the selected database.")
+                .color(visual::MUTED),
+        );
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.pattern)
+                    .hint_text("Filter pattern, e.g. app:session:*")
+                    .desired_width(f32::INFINITY),
+            );
+            if ui
+                .add_enabled(
+                    self.client.is_some(),
+                    egui::Button::new("Scan keys").fill(visual::MINT_DARK),
+                )
+                .clicked()
+            {
+                self.scan_keys();
+            }
+        });
+
+        egui::CollapsingHeader::new("Create a string key")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_key_name)
+                            .hint_text("key name")
+                            .desired_width(150.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_key_value)
+                            .hint_text("value")
+                            .desired_width(150.0),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_key_ttl)
+                            .hint_text("TTL seconds · optional")
+                            .desired_width(190.0),
+                    );
+                    if ui.button("Create").clicked() {
+                        self.create_string_key();
+                    }
+                });
+            });
         if self.keys.is_empty() {
-            ui.label("No keys found for this pattern.");
+            egui::Frame::new()
+                .fill(visual::SURFACE_RAISED)
+                .corner_radius(12)
+                .inner_margin(16)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("No matching keys").strong());
+                    ui.label(
+                        egui::RichText::new("Try another pattern or create a key.")
+                            .color(visual::MUTED),
+                    );
+                });
         } else {
             let mut requested_key = None;
             egui::ScrollArea::vertical()
-                .max_height(260.0)
+                .max_height(220.0)
                 .show(ui, |ui| {
                     for key in &self.keys {
-                        if ui
-                            .selectable_label(self.selected_key.as_ref() == Some(key), key)
-                            .clicked()
-                        {
-                            requested_key = Some(key.clone());
-                        }
+                        let selected = self.selected_key.as_ref() == Some(key);
+                        egui::Frame::new()
+                            .fill(if selected {
+                                visual::MINT_DARK
+                            } else {
+                                visual::SURFACE_RAISED
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if selected {
+                                    visual::MINT
+                                } else {
+                                    visual::BORDER
+                                },
+                            ))
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(10, 2))
+                            .show(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        egui::RichText::new(key).monospace(),
+                                    )
+                                    .clicked()
+                                {
+                                    requested_key = Some(key.clone());
+                                }
+                            });
                     }
                 });
             if let Some(key) = requested_key {
@@ -769,14 +863,17 @@ impl ValkeyManagerApp {
                             .desired_width(f32::INFINITY),
                     );
                     ui.horizontal(|ui| {
-                        ui.label("TTL seconds (blank = persistent)");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.ttl_input).desired_width(100.0),
-                        );
+                        ui.label("TTL sec.");
+                        ui.add(egui::TextEdit::singleline(&mut self.ttl_input).desired_width(90.0));
                         if ui.button("Save value").clicked() {
                             self.save_selected_string();
                         }
                     });
+                    ui.label(
+                        egui::RichText::new("Leave blank for a persistent key.")
+                            .size(11.0)
+                            .color(visual::MUTED),
+                    );
                 }
                 KeyValue::List(values) => {
                     ui.label("List entries (first 100)");
@@ -816,16 +913,14 @@ impl ValkeyManagerApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.hash_field_input)
                                 .hint_text("field")
-                                .desired_width(160.0),
+                                .desired_width(120.0),
                         );
                         ui.add(
                             egui::TextEdit::singleline(&mut self.hash_value_input)
                                 .hint_text("value")
-                                .desired_width(160.0),
+                                .desired_width(120.0),
                         );
-                        if ui.button("Add / update field").clicked()
-                            && !self.hash_field_input.is_empty()
-                        {
+                        if ui.button("Save field").clicked() && !self.hash_field_input.is_empty() {
                             self.run_collection_command(
                                 "HSET".to_owned(),
                                 vec![
@@ -894,14 +989,14 @@ impl ValkeyManagerApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.sorted_member_input)
                                 .hint_text("member")
-                                .desired_width(170.0),
+                                .desired_width(130.0),
                         );
                         ui.add(
                             egui::TextEdit::singleline(&mut self.sorted_score_input)
                                 .hint_text("score")
-                                .desired_width(90.0),
+                                .desired_width(70.0),
                         );
-                        if ui.button("Add / update score").clicked() {
+                        if ui.button("Add score").clicked() {
                             match self.sorted_score_input.parse::<f64>() {
                                 Ok(score)
                                     if score.is_finite()
@@ -952,7 +1047,14 @@ impl ValkeyManagerApp {
                 ui.group(|ui| {
                     ui.label(format!("Remove {target} from this key?"));
                     ui.horizontal(|ui| {
-                        if ui.button("Confirm remove").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("Confirm remove").strong())
+                                    .fill(visual::RED_DARK)
+                                    .stroke(egui::Stroke::new(1.0, visual::RED)),
+                            )
+                            .clicked()
+                        {
                             self.pending_collection_remove = None;
                             self.run_collection_command(command, arguments);
                         }
@@ -969,7 +1071,14 @@ impl ValkeyManagerApp {
                 if ui.button("Rename safely").clicked() {
                     self.rename_selected_key();
                 }
-                if ui.button("Delete…").clicked() {
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Delete…").strong())
+                            .fill(visual::RED_DARK)
+                            .stroke(egui::Stroke::new(1.0, visual::RED)),
+                    )
+                    .clicked()
+                {
                     self.confirm_delete = true;
                 }
             });
@@ -977,7 +1086,14 @@ impl ValkeyManagerApp {
                 ui.group(|ui| {
                     ui.label(format!("Permanently delete {key}?"));
                     ui.horizontal(|ui| {
-                        if ui.button("Confirm delete").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("Confirm delete").strong())
+                                    .fill(visual::RED_DARK)
+                                    .stroke(egui::Stroke::new(1.0, visual::RED)),
+                            )
+                            .clicked()
+                        {
                             self.delete_selected_key();
                         }
                         if ui.button("Cancel").clicked() {
@@ -991,73 +1107,144 @@ impl ValkeyManagerApp {
 
     fn render_console(&mut self, ui: &mut egui::Ui) {
         ui.heading("Command console");
-        ui.label("Arguments support shell-style quotes; no shell is invoked.");
+        ui.label(
+            egui::RichText::new("Run a command against the active connection.")
+                .color(visual::MUTED),
+        );
+        egui::Frame::new()
+            .fill(visual::SURFACE_RAISED)
+            .stroke(egui::Stroke::new(1.0, visual::BORDER))
+            .corner_radius(10)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("›_").monospace().strong().color(visual::LIME));
+                    ui.label(
+                        egui::RichText::new(
+                            "Arguments support shell-style quotes; commands run through Valkey, not a shell.",
+                        )
+                        .size(12.0)
+                        .color(visual::MUTED),
+                    );
+                });
+            });
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             let input = ui.add_enabled(
                 self.client.is_some(),
                 egui::TextEdit::singleline(&mut self.command_input)
-                    .hint_text("GET my:key")
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("GET app:session:123")
                     .desired_width(f32::INFINITY),
             );
             let run = ui
-                .add_enabled(self.client.is_some(), egui::Button::new("Run"))
+                .add_enabled(
+                    self.client.is_some(),
+                    egui::Button::new("Run command").fill(visual::MINT_DARK),
+                )
                 .clicked();
             if run || (input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
             {
                 self.run_console_command();
             }
         });
-        ui.label("Response");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.command_output)
-                    .desired_rows(16)
-                    .desired_width(f32::INFINITY)
-                    .interactive(false),
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("RESPONSE")
+                    .size(11.0)
+                    .strong()
+                    .color(visual::MUTED),
             );
+            if !self.command_output.is_empty() {
+                ui.label(
+                    egui::RichText::new("latest result")
+                        .size(11.0)
+                        .color(visual::MUTED),
+                );
+            }
         });
+        egui::Frame::new()
+            .fill(visual::SURFACE_INPUT)
+            .stroke(egui::Stroke::new(1.0, visual::BORDER))
+            .corner_radius(10)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.command_output)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(18)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
+                    );
+                });
+            });
     }
 
     fn render_monitor(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Server monitor");
-            if ui
-                .add_enabled(self.client.is_some(), egui::Button::new("Refresh"))
-                .clicked()
-            {
-                self.refresh_monitor();
-            }
+            ui.heading("Server health");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(self.client.is_some(), egui::Button::new("Refresh"))
+                    .clicked()
+                {
+                    self.refresh_monitor();
+                }
+            });
         });
-        ui.separator();
+        ui.label(
+            egui::RichText::new("A live snapshot of the selected Valkey instance.")
+                .color(visual::MUTED),
+        );
         if let Some(snapshot) = &self.monitor {
+            let uptime = format!("{} sec", snapshot.uptime_seconds);
+            let metrics = [
+                ("Connection", snapshot.ping.as_str(), visual::LIME),
+                ("Valkey version", snapshot.version.as_str(), visual::MINT),
+                (
+                    "Connected clients",
+                    snapshot.connected_clients.as_str(),
+                    visual::AMBER,
+                ),
+                ("Memory used", snapshot.used_memory.as_str(), visual::MINT),
+                (
+                    "Keys in database",
+                    snapshot.keys_in_database.as_str(),
+                    visual::LIME,
+                ),
+                (
+                    "Commands processed",
+                    snapshot.commands_processed.as_str(),
+                    visual::AMBER,
+                ),
+                ("Uptime", uptime.as_str(), visual::MINT),
+            ];
+            let column_count = if ui.available_width() < 590.0 { 2 } else { 3 };
             egui::Grid::new("server-metrics")
-                .num_columns(2)
-                .striped(true)
+                .num_columns(column_count)
+                .spacing(egui::vec2(12.0, 12.0))
                 .show(ui, |ui| {
-                    ui.label("PING");
-                    ui.monospace(&snapshot.ping);
-                    ui.end_row();
-                    ui.label("Valkey version");
-                    ui.monospace(&snapshot.version);
-                    ui.end_row();
-                    ui.label("Uptime (seconds)");
-                    ui.monospace(&snapshot.uptime_seconds);
-                    ui.end_row();
-                    ui.label("Connected clients");
-                    ui.monospace(&snapshot.connected_clients);
-                    ui.end_row();
-                    ui.label("Memory used");
-                    ui.monospace(&snapshot.used_memory);
-                    ui.end_row();
-                    ui.label("Commands processed");
-                    ui.monospace(&snapshot.commands_processed);
-                    ui.end_row();
-                    ui.label("Keys in selected database");
-                    ui.monospace(&snapshot.keys_in_database);
-                    ui.end_row();
+                    for (index, (label, value, accent)) in metrics.iter().enumerate() {
+                        visual::metric_card(ui, label, value, *accent);
+                        if (index + 1) % column_count == 0 {
+                            ui.end_row();
+                        }
+                    }
+                    if metrics.len() % column_count != 0 {
+                        ui.end_row();
+                    }
                 });
         } else {
-            ui.label("Refresh to load server health and INFO metrics.");
+            ui.vertical_centered(|ui| {
+                ui.add_space(36.0);
+                ui.label(egui::RichText::new("◎").size(36.0).color(visual::MINT));
+                ui.label(egui::RichText::new("No snapshot yet").strong());
+                ui.label(
+                    egui::RichText::new("Refresh to collect health and server metrics.")
+                        .color(visual::MUTED),
+                );
+            });
         }
     }
 
@@ -1182,125 +1369,278 @@ impl eframe::App for ValkeyManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive_events();
         ui.ctx().request_repaint_after(Duration::from_millis(100));
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Valkey Manager");
-                ui.separator();
-                ui.label(&self.status);
+        let context = ui.ctx().clone();
+        let brand_mark = self
+            .brand_mark
+            .get_or_insert_with(|| {
+                let image = image::load_from_memory(include_bytes!(
+                    "../assets/brand/valkey-manager-mark.png"
+                ))
+                .expect("embedded Valkey Manager brand mark is a valid image")
+                .into_rgba8();
+                let (width, height) = image.dimensions();
+                context.load_texture(
+                    "valkey-manager-brand-mark",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize],
+                        image.as_raw(),
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            })
+            .clone();
+
+        egui::Panel::top("app-header")
+            .exact_size(68.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(visual::SURFACE)
+                    .stroke(egui::Stroke::new(1.0, visual::BORDER))
+                    .inner_margin(egui::Margin::symmetric(20, 12)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.image((brand_mark.id(), egui::vec2(40.0, 40.0)));
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Valkey Manager")
+                                .size(20.0)
+                                .strong()
+                                .color(visual::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new("A focused workspace for your data")
+                                .size(11.0)
+                                .color(visual::MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (label, color) = if self.client.is_some() {
+                            ("CONNECTED", visual::LIME)
+                        } else if self.connecting {
+                            ("CONNECTING", visual::AMBER)
+                        } else {
+                            ("OFFLINE", visual::MUTED)
+                        };
+                        egui::Frame::new()
+                            .fill(visual::SURFACE_RAISED)
+                            .stroke(egui::Stroke::new(1.0, visual::BORDER))
+                            .corner_radius(egui::CornerRadius::same(20))
+                            .inner_margin(egui::Margin::symmetric(12, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("●").size(10.0).color(color));
+                                    ui.label(
+                                        egui::RichText::new(label).size(11.0).strong().color(color),
+                                    );
+                                });
+                            });
+                    });
+                });
             });
-            ui.separator();
-            ui.columns(2, |columns| {
-                columns[0].set_width(300.0);
-                columns[0].heading("Connection");
-                columns[0].add_space(8.0);
-                let selected_name = self
-                    .profiles
-                    .iter()
-                    .find(|profile| Some(profile.id) == self.selected_profile)
-                    .map(|profile| profile.name.as_str())
-                    .unwrap_or("Unsaved connection");
-                let mut selected = self.selected_profile;
-                egui::ComboBox::from_label("Saved profile")
-                    .selected_text(selected_name)
-                    .show_ui(&mut columns[0], |ui| {
-                        for profile in &self.profiles {
-                            ui.selectable_value(&mut selected, Some(profile.id), &profile.name);
+
+        egui::Panel::left("connection-sidebar")
+            .resizable(false)
+            .exact_size(294.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(visual::CANVAS)
+                    .stroke(egui::Stroke::new(1.0, visual::BORDER))
+                    .inner_margin(egui::Margin::same(18)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    visual::section_label(ui, "Connection");
+                    ui.heading("Profiles");
+                    ui.label(
+                        egui::RichText::new("Choose a saved endpoint or create a new one.")
+                            .size(12.0)
+                            .color(visual::MUTED),
+                    );
+                    ui.add_space(14.0);
+
+                    visual::section_label(ui, "Saved profile");
+                    let selected_name = self
+                        .profiles
+                        .iter()
+                        .find(|profile| Some(profile.id) == self.selected_profile)
+                        .map(|profile| profile.name.as_str())
+                        .unwrap_or("Unsaved connection");
+                    let mut selected = self.selected_profile;
+                    egui::ComboBox::from_id_salt("saved-profile-picker")
+                        .selected_text(selected_name)
+                        .width(250.0)
+                        .show_ui(ui, |ui| {
+                            for profile in &self.profiles {
+                                ui.selectable_value(&mut selected, Some(profile.id), &profile.name);
+                            }
+                        });
+                    if selected != self.selected_profile {
+                        self.select_profile(selected);
+                    }
+
+                    ui.add_space(10.0);
+                    visual::section_label(ui, "Profile name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.profile_name)
+                            .hint_text("e.g. Local development")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(8.0);
+                    visual::section_label(ui, "Valkey endpoint");
+                    let endpoint_response = ui.add(
+                        egui::TextEdit::singleline(&mut self.endpoint)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("redis://127.0.0.1:16479")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if endpoint_response.changed() && self.connecting {
+                        self.status =
+                            "Finish or retry the current connection before editing".into();
+                    }
+                    ui.add_space(8.0);
+                    visual::section_label(ui, "Password · optional");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.password)
+                            .password(true)
+                            .hint_text("Stored in your system keychain")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            self.save_profile();
+                        }
+                        if ui.button("New profile").clicked() {
+                            self.new_profile();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.selected_profile.is_some(),
+                                egui::Button::new("Remove"),
+                            )
+                            .clicked()
+                        {
+                            self.delete_selected_profile();
                         }
                     });
-                if selected != self.selected_profile {
-                    self.select_profile(selected);
-                }
-                columns[0].label("Profile name");
-                columns[0].add(
-                    egui::TextEdit::singleline(&mut self.profile_name).desired_width(f32::INFINITY),
-                );
-                columns[0].label("Redis URL");
-                let endpoint_response = columns[0].add(
-                    egui::TextEdit::singleline(&mut self.endpoint)
-                        .hint_text("redis://127.0.0.1:6379")
-                        .desired_width(f32::INFINITY),
-                );
-                if endpoint_response.changed() && self.connecting {
-                    self.status = "Finish or retry the current connection before editing".into();
-                }
-                columns[0].label("Password (optional)");
-                columns[0].add(
-                    egui::TextEdit::singleline(&mut self.password)
-                        .password(true)
-                        .desired_width(f32::INFINITY),
-                );
-                columns[0].horizontal(|ui| {
-                    if ui.button("Save profile").clicked() {
-                        self.save_profile();
-                    }
-                    if ui.button("New").clicked() {
-                        self.new_profile();
-                    }
+                    ui.add_space(10.0);
+                    let connect_button = if self.connecting {
+                        egui::Button::new("Connecting…").fill(visual::MINT_DARK)
+                    } else {
+                        egui::Button::new(egui::RichText::new("Connect to Valkey").strong())
+                            .fill(visual::MINT_DARK)
+                    };
                     if ui
-                        .add_enabled(self.selected_profile.is_some(), egui::Button::new("Remove"))
+                        .add_enabled(self.client.is_none() && !self.connecting, connect_button)
                         .clicked()
                     {
-                        self.delete_selected_profile();
+                        self.connect();
                     }
-                });
-                columns[0].add_space(8.0);
-                if columns[0]
-                    .add_enabled(
-                        self.client.is_none() && !self.connecting,
-                        egui::Button::new("Connect"),
-                    )
-                    .clicked()
-                {
-                    self.connect();
-                }
-                if self.client.is_some() {
-                    columns[0].label("Connection is active");
-                    if columns[0].button("Disconnect").clicked() {
+                    if self.client.is_some() && ui.button("Disconnect").clicked() {
                         self.disconnect();
                     }
-                }
-                columns[0].add_space(16.0);
-                columns[0].label("Key pattern");
-                columns[0].horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.pattern).desired_width(f32::INFINITY),
-                    );
-                    if ui
-                        .add_enabled(self.client.is_some(), egui::Button::new("Scan"))
-                        .clicked()
-                    {
-                        self.scan_keys();
-                    }
-                });
 
-                columns[1].horizontal(|ui| {
-                    if ui
-                        .selectable_label(self.active_tab == WorkspaceTab::Keys, "Keys")
-                        .clicked()
-                    {
-                        self.active_tab = WorkspaceTab::Keys;
-                    }
-                    if ui
-                        .selectable_label(self.active_tab == WorkspaceTab::Console, "Console")
-                        .clicked()
-                    {
-                        self.active_tab = WorkspaceTab::Console;
-                    }
-                    if ui
-                        .selectable_label(self.active_tab == WorkspaceTab::Monitor, "Monitor")
-                        .clicked()
-                    {
-                        self.active_tab = WorkspaceTab::Monitor;
+                    ui.add_space(20.0);
+                    egui::Frame::new()
+                        .fill(visual::SURFACE)
+                        .stroke(egui::Stroke::new(1.0, visual::BORDER))
+                        .corner_radius(10)
+                        .inner_margin(12)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("CREDENTIALS STAY PRIVATE")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(visual::MINT),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Passwords are kept in the OS keychain, not in profile files.",
+                                )
+                                .size(11.0)
+                                .color(visual::MUTED),
+                            );
+                        });
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new(&self.status)
+                                .size(11.0)
+                                .color(visual::MUTED),
+                        );
+                    });
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(visual::CANVAS)
+                    .inner_margin(egui::Margin::same(22)),
+            )
+            .show(ui, |ui| {
+                let (title, description) = match self.active_tab {
+                    WorkspaceTab::Keys => (
+                        "Keyspace",
+                        "Find, inspect, and safely update your Valkey data.",
+                    ),
+                    WorkspaceTab::Console => (
+                        "Command console",
+                        "Run protocol commands with a clear view of every response.",
+                    ),
+                    WorkspaceTab::Monitor => (
+                        "Server monitor",
+                        "Understand the health and activity of your selected instance.",
+                    ),
+                };
+                ui.heading(title);
+                ui.label(egui::RichText::new(description).color(visual::MUTED));
+                ui.add_space(16.0);
+
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (WorkspaceTab::Keys, "Keys"),
+                        (WorkspaceTab::Console, "Console"),
+                        (WorkspaceTab::Monitor, "Monitor"),
+                    ] {
+                        let selected = self.active_tab == tab;
+                        let button = egui::Button::new(egui::RichText::new(label).strong().color(
+                            if selected {
+                                visual::TEXT
+                            } else {
+                                visual::MUTED
+                            },
+                        ))
+                        .fill(if selected {
+                            visual::MINT_DARK
+                        } else {
+                            visual::SURFACE
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if selected {
+                                visual::MINT
+                            } else {
+                                visual::BORDER
+                            },
+                        ))
+                        .corner_radius(10);
+                        if ui.add_sized([112.0, 40.0], button).clicked() {
+                            self.active_tab = tab;
+                        }
                     }
                 });
-                columns[1].separator();
-                match self.active_tab {
-                    WorkspaceTab::Keys => self.render_keys(&mut columns[1]),
-                    WorkspaceTab::Console => self.render_console(&mut columns[1]),
-                    WorkspaceTab::Monitor => self.render_monitor(&mut columns[1]),
-                }
+                ui.add_space(12.0);
+
+                visual::card_frame().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| match self.active_tab {
+                        WorkspaceTab::Keys => self.render_keys(ui),
+                        WorkspaceTab::Console => self.render_console(ui),
+                        WorkspaceTab::Monitor => self.render_monitor(ui),
+                    });
+                });
             });
-        });
     }
 }
 
@@ -1316,7 +1656,10 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         "Valkey Manager",
         options,
-        Box::new(|_context| Ok(Box::<ValkeyManagerApp>::default())),
+        Box::new(|creation_context| {
+            visual::apply_theme(&creation_context.egui_ctx);
+            Ok(Box::<ValkeyManagerApp>::default())
+        }),
     )
 }
 
@@ -1338,7 +1681,7 @@ mod tests {
 
     #[test]
     fn default_endpoint_is_a_valid_valkey_url() {
-        assert!(RedisConfig::from_url("redis://127.0.0.1:6379").is_ok());
+        assert!(RedisConfig::from_url("redis://127.0.0.1:16479").is_ok());
     }
 
     #[test]
@@ -1346,6 +1689,17 @@ mod tests {
         let icon = app_icon();
         assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
         assert_eq!((icon.width, icon.height), (128, 128));
+    }
+
+    #[test]
+    fn app_theme_uses_the_valkey_dark_palette_and_spacing() {
+        let context = egui::Context::default();
+        visual::apply_theme(&context);
+        let style = context.style_of(egui::Theme::Dark);
+
+        assert_eq!(style.visuals.panel_fill, visual::CANVAS);
+        assert_eq!(style.visuals.widgets.hovered.bg_stroke.color, visual::MINT);
+        assert_eq!(style.spacing.item_spacing, egui::vec2(10.0, 10.0));
     }
 
     #[test]
