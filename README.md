@@ -13,19 +13,33 @@ windowing and OpenGL backends, then run from the repository root:
 cargo run
 ```
 
-## Run a local Valkey 9 for testing
+## Develop against local Valkey 9
 
-With Docker installed, this starts Valkey on an available loopback port, waits for
-it to answer `PING`, then prints the connection URL to enter in the app:
+The Makefile starts a pinned Valkey 9.0.0 instance on loopback port `16479` and
+launches the app:
 
 ```sh
-docker run --detach --rm --name valkey-manager-test --publish 127.0.0.1::6379 valkey/valkey:9
-until [ "$(docker exec valkey-manager-test valkey-cli ping 2>/dev/null)" = "PONG" ]; do sleep 1; done
-host_port="$(docker port valkey-manager-test 6379/tcp | sed 's/.*://')"
-printf 'Connection string: redis://127.0.0.1:%s\n' "$host_port"
+make dev
 ```
 
-Stop the temporary server when finished with `docker stop valkey-manager-test`.
+Connect using `redis://127.0.0.1:16479`, then stop the local server with
+`make dev-down`. Use `make dev-up` to start the server without launching the app.
+Override the host port with `VALKEY_PORT=...` if needed.
+
+Run the integration and end-to-end performance checks against an isolated Valkey 9
+test instance with:
+
+```sh
+make test-e2e
+```
+
+The checks run the real Valkey protocol integration suite plus end-to-end latency
+checks for the same bounded key scan and selected-string reader used by the app. They
+report p50/p95 latency, assert generous local-service budgets, use uniquely namespaced
+expiring keys, and remove their test data. The script starts and stops Compose
+automatically in an isolated Compose project, using port `16480` by default. Set
+`VALKEY_E2E_PORT=...` to choose a different test port; this keeps a regular development
+Valkey container running independently.
 
 ## Install a release
 
@@ -52,3 +66,9 @@ keychain.
 Valkey Manager is a native Rust/egui desktop application; the active application does
 not use Tauri, a webview, or a JavaScript frontend. Current connections support
 standalone Valkey endpoints. Sentinel, Cluster, and Pub/Sub support remain future work.
+
+## Visual identity
+
+The dark blue-green workspace, mint/lime Valkey accents, amber signal color, and shared
+egui tokens are documented in [Visual identity](docs/visual-identity.md) and
+implemented in `src/visual.rs`.
